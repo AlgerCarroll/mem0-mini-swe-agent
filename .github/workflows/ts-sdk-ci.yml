@@ -1,0 +1,191 @@
+name: TypeScript SDK CI
+
+# On PRs this is invoked by ci-gate.yml (the single required check);
+# push-to-main runs remain standalone.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mem0-ts/**'
+      - '.github/workflows/ts-sdk-ci.yml'
+  workflow_call:
+
+
+jobs:
+  check_changes:
+    name: Check TypeScript SDK Changes
+    runs-on: ubuntu-latest
+    outputs:
+      sdk_changed: ${{ steps.filter.outputs.sdk }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Detect TypeScript SDK changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            sdk:
+              - 'mem0-ts/**'
+
+  changelog_check:
+    name: Check TypeScript SDK Changelog
+    runs-on: ubuntu-latest
+    needs: check_changes
+    if: needs.check_changes.outputs.sdk_changed == 'true' && github.event_name == 'pull_request'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify changelog for SDK version changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_VERSION=$(node -p "require('./mem0-ts/package.json').version || ''" 2>/dev/null) || CURRENT_VERSION=""
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "::error::Unable to read the current TypeScript SDK version from mem0-ts/package.json."
+            exit 1
+          fi
+          echo "Current TypeScript SDK version: ${CURRENT_VERSION}"
+
+          BASE_VERSION=""
+          if BASE_PACKAGE_JSON=$(git show "${BASE_SHA}:mem0-ts/package.json" 2>/dev/null); then
+            BASE_VERSION=$(printf '%s' "$BASE_PACKAGE_JSON" | node -e '
+              let data = "";
+              process.stdin.on("data", (chunk) => (data += chunk));
+              process.stdin.on("end", () => {
+                try {
+                  const pkg = JSON.parse(data);
+                  if (pkg.version) process.stdout.write(String(pkg.version));
+                } catch {
+                  process.exit(1);
+                }
+              });
+            ' 2>/dev/null) || BASE_VERSION=""
+          fi
+
+          if [ -z "$BASE_VERSION" ] || [ "$BASE_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "Base version is unavailable, empty, or unchanged; changelog update is not required."
+            exit 0
+          fi
+
+          echo "TypeScript SDK version changed from ${BASE_VERSION} to ${CURRENT_VERSION}; checking docs/changelog/sdk.mdx."
+          CHANGED_CHANGELOG=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}" -- docs/changelog/sdk.mdx)
+          if [ -n "$CHANGED_CHANGELOG" ]; then
+            echo "TypeScript SDK changelog was updated."
+          else
+            echo "::error::The TypeScript SDK version changed from ${BASE_VERSION} to ${CURRENT_VERSION}, but docs/changelog/sdk.mdx was not updated. Add a TypeScript SDK changelog entry for the current version."
+            exit 1
+          fi
+
+  build_ts_sdk:
+    name: Build and Test TypeScript SDK (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: check_changes
+    if: needs.check_changes.outputs.sdk_changed == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.5.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+          cache-dependency-path: mem0-ts/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: mem0-ts
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting with Prettier
+        working-directory: mem0-ts
+        run: pnpm exec prettier --check .
+
+      - name: Build TypeScript SDK
+        working-directory: mem0-ts
+        run: pnpm run build
+
+      - name: Run unit tests
+        working-directory: mem0-ts
+        run: pnpm run test:unit
+
+      - name: Load built CommonJS entry points
+        working-directory: mem0-ts
+        shell: bash
+        run: |
+          node <<'NODE'
+          const entries = {
+            client: "./dist/index.js",
+            oss: "./dist/oss/index.js",
+          };
+
+          for (const [name, entry] of Object.entries(entries)) {
+            const loaded = require(entry);
+            console.log(`${name} entry exported members: ${Object.keys(loaded).length}`);
+          }
+          NODE
+
+      - name: Upload SDK coverage report
+        if: success() && matrix.node-version == '20'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ts-sdk-coverage-node-${{ matrix.node-version }}
+          path: mem0-ts/coverage
+          if-no-files-found: ignore
+
+  integration_ts_sdk:
+    name: Integration Test TypeScript SDK (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: build_ts_sdk
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.5.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+          cache-dependency-path: mem0-ts/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: mem0-ts
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript SDK
+        working-directory: mem0-ts
+        run: pnpm run build
+
+      - name: Run integration tests
+        working-directory: mem0-ts
+        env:
+          MEM0_API_KEY: ${{ secrets.MEM0_API_KEY }}
+        run: pnpm run test:integration
