@@ -1,0 +1,109 @@
+name: pi-agent-plugin checks
+
+# On PRs this is invoked by ci-gate.yml (the single required check);
+# push-to-main and manual runs remain standalone.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/pi-agent-plugin/**'
+      - '.github/workflows/pi-agent-plugin-checks.yml'
+  workflow_call:
+
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm run test
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        working-directory: integrations/pi-agent-plugin
+        run: pnpm run build
+
+      - name: Verify required build entry files
+        working-directory: integrations/pi-agent-plugin
+        shell: bash
+        run: |
+          missing=0
+          for file in dist/index.js dist/index.d.ts dist/entry.js dist/entry.d.ts; do
+            if [ ! -f "$file" ]; then
+              echo "::error file=$PWD/$file::Required build artifact '$file' is missing"
+              missing=1
+            fi
+          done
+          exit "$missing"
